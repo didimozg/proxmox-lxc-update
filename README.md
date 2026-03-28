@@ -6,11 +6,12 @@
 
 Russian documentation: [README_RU.md](./README_RU.md).
 
-This repository currently includes three host-side maintenance scripts for Proxmox:
+This repository currently includes four host-side maintenance scripts for Proxmox:
 
 - `update-lxc.sh`: update running containers directly from the Proxmox host
 - `update-lxc-safe.sh`: create a pre-update snapshot, run `update-lxc.sh`, and optionally roll back on failure
 - `backup-health-check.sh`: audit vzdump backup jobs, recent backup task health, backup coverage across the cluster, and optional Telegram notifications
+- `deploy-proxmox-maintenance.sh`: deploy repository scripts and optional backup-health-check systemd files to other nodes over SSH/SCP
 
 `update-lxc.sh` is the main updater for running Proxmox LXC containers executed directly from the Proxmox host with `pct exec`.
 
@@ -45,6 +46,7 @@ If `ostype` is missing or not useful, the script falls back to package manager d
 - `grep`
 - `mktemp` when `--parallel` is greater than `1`
 - `curl` when Telegram notifications are enabled for `backup-health-check.sh`
+- `ssh` and `scp` when using `deploy-proxmox-maintenance.sh`
 
 ## Installation
 
@@ -52,9 +54,11 @@ Clone the repository or copy the scripts to the Proxmox host:
 
 ```bash
 chmod +x backup-health-check.sh
+chmod +x deploy-proxmox-maintenance.sh
 chmod +x update-lxc.sh
 chmod +x update-lxc-safe.sh
 sudo ./backup-health-check.sh --help
+./deploy-proxmox-maintenance.sh --help
 sudo ./update-lxc.sh --help
 sudo ./update-lxc-safe.sh --help
 ```
@@ -290,6 +294,86 @@ Notes:
 - `BACKUP_HEALTH_CHECK_ARGS` is split on spaces, so keep it simple.
 - The service adds `--no-color` automatically for clean logs and Telegram messages.
 - The target Telegram user must start the bot first, otherwise Telegram will reject the message.
+
+## Deployment Script
+
+`deploy-proxmox-maintenance.sh` is an admin-side deployment helper for synchronizing this repository to one or more Proxmox nodes over `ssh` and `scp`.
+
+It deploys:
+
+- `update-lxc.sh` as `update_lxc.sh`
+- `update-lxc-safe.sh` as `update_lxc_safe.sh`
+- `backup-health-check.sh` as `backup_health_check.sh`
+- optional `backup-health-check` `systemd` service, timer, and config
+
+### Deployment Highlights
+
+- deploy to one or more nodes with repeated `--host`
+- create remote `.bak.<timestamp>` files before overwriting content
+- preserve an existing `/etc/default/proxmox-backup-health-check` by default
+- generate a new backup-health-check config when one is missing
+- optionally replace the remote config with `--overwrite-config`
+- optionally populate generated config values for `BACKUP_HEALTH_CHECK_ARGS` and Telegram delivery
+- optionally enable or disable the timer after deployment
+- support `--interactive` mode for paths and Telegram values
+
+### Deployment Examples
+
+Deploy to two nodes:
+
+```bash
+./deploy-proxmox-maintenance.sh --host root@192.168.4.10 --host root@192.168.4.12
+```
+
+Preview actions only:
+
+```bash
+./deploy-proxmox-maintenance.sh --host root@192.168.4.10 --dry-run
+```
+
+First-time connect to a new node from Git Bash:
+
+```bash
+./deploy-proxmox-maintenance.sh --host root@192.168.4.10 --ssh-option StrictHostKeyChecking=accept-new
+```
+
+Force Windows OpenSSH clients from Git Bash:
+
+```bash
+./deploy-proxmox-maintenance.sh --host root@192.168.4.10 --ssh-bin ssh.exe --scp-bin scp.exe
+```
+
+Deploy and enable the backup-health-check timer:
+
+```bash
+./deploy-proxmox-maintenance.sh --host root@192.168.4.10 --enable-backup-health-timer
+```
+
+Deploy with generated Telegram settings:
+
+```bash
+./deploy-proxmox-maintenance.sh \
+  --host root@192.168.4.10 \
+  --overwrite-config \
+  --backup-health-check-args "--node pve" \
+  --telegram-bot-token 123456:replace-me \
+  --telegram-chat-id 123456789
+```
+
+Use interactive mode:
+
+```bash
+./deploy-proxmox-maintenance.sh --interactive
+```
+
+### Deployment Notes
+
+- The deploy script is intended to be run from an admin workstation or another trusted host, not from inside a guest.
+- Remote script paths default to `/media/script`, which matches the layout used in this repository's current Proxmox nodes.
+- Generated Telegram values are written only into the remote config file; they are not committed back into the repository.
+- If `--skip-backup-health-systemd` is used, only the three shell scripts are synchronized.
+- `--ssh-option` is available when you need to pass extra OpenSSH behaviour such as `StrictHostKeyChecking=accept-new`.
+- `--ssh-bin` and `--scp-bin` are available when you want the Bash script to use different client binaries, for example `ssh.exe` and `scp.exe` on Windows.
 
 ## Options
 
