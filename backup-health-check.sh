@@ -581,7 +581,7 @@ for node in nodes:
     if node.get("node"):
         node_info[node["node"]] = node
 
-guest_counts = {}
+vm_container_counts = {}
 for resource in resources:
     if resource.get("type") not in {"lxc", "qemu"}:
         continue
@@ -590,7 +590,7 @@ for resource in resources:
     node = resource.get("node")
     if not node:
         continue
-    guest_counts[node] = guest_counts.get(node, 0) + 1
+    vm_container_counts[node] = vm_container_counts.get(node, 0) + 1
 
 overall = "OK"
 lines = []
@@ -630,7 +630,7 @@ for task_file in task_files:
     task_error = read_error(task_file + ".err")
     info = node_info.get(node, {})
     node_status = info.get("status", "unknown")
-    guest_count = guest_counts.get(node, 0)
+    vm_container_count = vm_container_counts.get(node, 0)
 
     latest = tasks[0] if tasks else None
     latest_success = next((task for task in tasks if task.get("status") == "OK"), None)
@@ -651,10 +651,10 @@ for task_file in task_files:
         node_severity = "CRIT"
         reasons.append("failed to query recent vzdump tasks")
     elif node_status != "online":
-        node_severity = "CRIT" if guest_count > 0 else "WARN"
+        node_severity = "CRIT" if vm_container_count > 0 else "WARN"
         reasons.append(f"node status={node_status}")
-    elif guest_count == 0 and not tasks:
-        reasons.append("no guests on node")
+    elif vm_container_count == 0 and not tasks:
+        reasons.append("no VMs or containers on node")
     elif latest_success is None:
         node_severity = "CRIT"
         reasons.append("no successful vzdump task found")
@@ -684,7 +684,7 @@ for task_file in task_files:
     latest_success_age = format_age(success_age)
     reason_text = "; ".join(reasons) if reasons else "healthy"
     lines.append(
-        f"- {node}: {node_severity} | guests={guest_count} | node-status={node_status} | "
+        f"- {node}: {node_severity} | vm-and-container-count={vm_container_count} | node-status={node_status} | "
         f"latest-task={latest_status} at {latest_finished} | latest-success={latest_success_finished} ({latest_success_age}) | {reason_text}"
     )
 lines.append("")
@@ -717,15 +717,15 @@ else:
     lines.append("- none")
 lines.append("")
 
-lines.append("Guests not covered by backup jobs:")
+lines.append("VMs and containers not covered by backup jobs:")
 if not_backed_up:
     overall = combine(overall, "WARN")
-    for guest in not_backed_up:
-        guest_id = guest.get("vmid", guest.get("id", "unknown"))
-        guest_node = guest.get("node", "unknown")
-        guest_type = guest.get("type", "unknown")
-        guest_name = guest.get("name", "unknown")
-        lines.append(f"- {guest_type}/{guest_id} on {guest_node}: {guest_name}")
+    for workload in not_backed_up:
+        workload_id = workload.get("vmid", workload.get("id", "unknown"))
+        workload_node = workload.get("node", "unknown")
+        workload_type = workload.get("type", "unknown")
+        workload_name = workload.get("name", "unknown")
+        lines.append(f"- {workload_type}/{workload_id} on {workload_node}: {workload_name}")
 else:
     lines.append("- none")
 lines.append("")
