@@ -76,7 +76,7 @@ Usage: $SCRIPT_NAME [options]
 Cluster-wide health check for Proxmox vzdump backup jobs and recent backup tasks.
 
 Options:
-  --node pve,minipveone        Limit checks to selected cluster nodes
+  --node pve-node-1,pve-node-2 Limit checks to selected cluster nodes
   --warn-age-hours HOURS       Warn when the latest successful vzdump on a node is older than this (default: ${DEFAULT_WARN_AGE_HOURS})
   --crit-age-hours HOURS       Critical when the latest successful vzdump on a node is older than this (default: ${DEFAULT_CRIT_AGE_HOURS})
   --recent-problem-hours HOURS Treat recent failed or warning tasks inside this window as active issues (default: ${DEFAULT_RECENT_PROBLEM_HOURS})
@@ -93,7 +93,7 @@ Options:
 
 Examples:
   $SCRIPT_NAME
-  $SCRIPT_NAME --node minipveone
+  $SCRIPT_NAME --node pve-node-1
   $SCRIPT_NAME --warn-age-hours 48 --crit-age-hours 96
   $SCRIPT_NAME --task-limit 50 --problem-limit 15
   TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... $SCRIPT_NAME --telegram-no-ok
