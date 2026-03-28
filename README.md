@@ -4,7 +4,12 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/didimozg/proxmox-lxc-update/ci.yml?branch=main&label=CI)](https://github.com/didimozg/proxmox-lxc-update/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/didimozg/proxmox-lxc-update)](./LICENSE)
 
-`update-lxc.sh` is a Bash script for updating running Proxmox LXC containers directly from the Proxmox host with `pct exec`.
+This repository currently includes two host-side Bash scripts for Proxmox LXC maintenance:
+
+- `update-lxc.sh`: update running containers directly from the Proxmox host
+- `update-lxc-safe.sh`: create a pre-update snapshot, run `update-lxc.sh`, and optionally roll back on failure
+
+`update-lxc.sh` is the main updater for running Proxmox LXC containers executed directly from the Proxmox host with `pct exec`.
 
 It is designed for practical day-to-day administration:
 
@@ -39,11 +44,13 @@ If `ostype` is missing or not useful, the script falls back to package manager d
 
 ## Installation
 
-Clone the repository or copy the script to the Proxmox host:
+Clone the repository or copy the scripts to the Proxmox host:
 
 ```bash
 chmod +x update-lxc.sh
+chmod +x update-lxc-safe.sh
 sudo ./update-lxc.sh --help
+sudo ./update-lxc-safe.sh --help
 ```
 
 ## Quick Start
@@ -90,6 +97,79 @@ Write logs to a custom location:
 ./update-lxc.sh --log-file /root/pve-lxc-update.log
 ```
 
+## Safe Update Script
+
+`update-lxc-safe.sh` is a serial safety wrapper around `update-lxc.sh`.
+
+For each selected running container it:
+
+1. creates a Proxmox snapshot
+2. runs `update-lxc.sh` only for that container
+3. optionally rolls the container back when the update fails
+4. optionally starts the container again after rollback
+5. removes the snapshot after a successful update unless told to keep it
+
+### Quick Start
+
+Run a safe update for all running containers:
+
+```bash
+./update-lxc-safe.sh
+```
+
+Preview snapshots, update commands, and rollback actions:
+
+```bash
+./update-lxc-safe.sh --dry-run
+```
+
+Update only selected containers and keep successful snapshots:
+
+```bash
+./update-lxc-safe.sh --ct 101,102 --keep-snapshot
+```
+
+Use a custom snapshot name:
+
+```bash
+./update-lxc-safe.sh --snapshot-name before-maintenance
+```
+
+Disable automatic rollback:
+
+```bash
+./update-lxc-safe.sh --no-rollback
+```
+
+### Safe Script Options
+
+```text
+--dry-run
+--ct 101,102,103
+--exclude 104,105
+--log-file PATH
+--no-color
+--timeout SECONDS
+--apt-mode upgrade|dist-upgrade
+--update-script PATH
+--snapshot-prefix PREFIX
+--snapshot-name NAME
+--keep-snapshot
+--no-rollback
+--no-start-after-rollback
+-h, --help
+```
+
+### Safe Script Notes
+
+- `update-lxc-safe.sh` intentionally runs containers one by one.
+- The same snapshot name is used for all selected containers in a single run; snapshots remain per-container on the Proxmox side.
+- By default, snapshots are deleted after a successful update and kept after a failed update.
+- By default, the script attempts rollback on update failure.
+- After rollback, the script starts the container again unless `--no-start-after-rollback` is used.
+- Manual interruption does not trigger an automatic rollback workflow; handle interrupted containers deliberately.
+- Snapshot creation still depends on the underlying Proxmox storage supporting container snapshots.
+
 ## Options
 
 ```text
@@ -121,6 +201,12 @@ By default, the log is written to:
 
 ```text
 /var/log/pve-lxc-update.log
+```
+
+The safe wrapper uses its own log by default:
+
+```text
+/var/log/pve-lxc-safe-update.log
 ```
 
 The log includes:
