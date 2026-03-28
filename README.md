@@ -10,7 +10,7 @@ This repository currently includes three host-side maintenance scripts for Proxm
 
 - `update-lxc.sh`: update running containers directly from the Proxmox host
 - `update-lxc-safe.sh`: create a pre-update snapshot, run `update-lxc.sh`, and optionally roll back on failure
-- `backup-health-check.sh`: audit vzdump backup jobs, recent backup task health, and backup coverage across the cluster
+- `backup-health-check.sh`: audit vzdump backup jobs, recent backup task health, backup coverage across the cluster, and optional Telegram notifications
 
 `update-lxc.sh` is the main updater for running Proxmox LXC containers executed directly from the Proxmox host with `pct exec`.
 
@@ -44,6 +44,7 @@ If `ostype` is missing or not useful, the script falls back to package manager d
 - `awk`
 - `grep`
 - `mktemp` when `--parallel` is greater than `1`
+- `curl` when Telegram notifications are enabled for `backup-health-check.sh`
 
 ## Installation
 
@@ -213,6 +214,12 @@ Write the report to a custom log file:
 ./backup-health-check.sh --log-file /root/pve-backup-health-check.log
 ```
 
+Run the health check and notify Telegram:
+
+```bash
+TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... ./backup-health-check.sh --telegram-no-ok
+```
+
 ### Backup Health Check Options
 
 ```text
@@ -223,6 +230,11 @@ Write the report to a custom log file:
 --task-limit N
 --problem-limit N
 --log-file PATH
+--telegram-bot-token TOKEN
+--telegram-chat-id ID
+--telegram-thread-id ID
+--telegram-timeout SECONDS
+--telegram-no-ok
 --no-color
 -h, --help
 ```
@@ -236,6 +248,48 @@ Write the report to a custom log file:
 - A node can still be reported as healthy even if older historical backup failures exist, as long as they are outside the recent problem window.
 - Guests returned by `/cluster/backup-info/not-backed-up` are reported separately so you can catch coverage gaps.
 - The script currently focuses on `vzdump` job health and coverage, not on detailed PBS datastore verification.
+- Telegram delivery is optional and is activated when both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are provided.
+- In production, prefer an external environment file over passing the Telegram token on the command line.
+- If Telegram is enabled and the report is too long, the message is truncated while the full report remains in the log file.
+- The Telegram sender automatically retries over IPv4 when the default network path fails, which helps on hosts with broken IPv6 egress.
+
+### Scheduled Execution With systemd
+
+The repository includes ready-to-use files in [systemd](./systemd):
+
+- `proxmox-backup-health-check.service`
+- `proxmox-backup-health-check.timer`
+- `proxmox-backup-health-check.env.example`
+
+Suggested deployment flow on a Proxmox node:
+
+```bash
+install -m 0755 backup-health-check.sh /usr/local/sbin/backup-health-check.sh
+install -m 0644 systemd/proxmox-backup-health-check.service /etc/systemd/system/proxmox-backup-health-check.service
+install -m 0644 systemd/proxmox-backup-health-check.timer /etc/systemd/system/proxmox-backup-health-check.timer
+install -m 0644 systemd/proxmox-backup-health-check.env.example /etc/default/proxmox-backup-health-check
+systemctl daemon-reload
+systemctl enable --now proxmox-backup-health-check.timer
+```
+
+Example `/etc/default/proxmox-backup-health-check`:
+
+```bash
+SCRIPT_PATH=/media/script/backup_health_check.sh
+LOG_FILE=/var/log/pve-backup-health-check.log
+BACKUP_HEALTH_CHECK_ARGS=
+TELEGRAM_BOT_TOKEN=123456:replace-me
+TELEGRAM_CHAT_ID=123456789
+TELEGRAM_THREAD_ID=
+TELEGRAM_NOTIFY_ON_OK=1
+TELEGRAM_TIMEOUT=15
+```
+
+Notes:
+
+- `BACKUP_HEALTH_CHECK_ARGS` is split on spaces, so keep it simple.
+- The service adds `--no-color` automatically for clean logs and Telegram messages.
+- The target Telegram user must start the bot first, otherwise Telegram will reject the message.
 
 ## Options
 

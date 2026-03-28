@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule the Proxmox backup health check
+
+[Timer]
+OnCalendar=*-*-* 07:15:00
+RandomizedDelaySec=10m
+Persistent=true
+Unit=proxmox-backup-health-check.service
+
+[Install]
+WantedBy=timers.target

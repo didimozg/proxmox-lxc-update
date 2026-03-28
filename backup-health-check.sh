@@ -14,6 +14,9 @@ readonly DEFAULT_CRIT_AGE_HOURS=336
 readonly DEFAULT_RECENT_PROBLEM_HOURS=336
 readonly DEFAULT_TASK_LIMIT=30
 readonly DEFAULT_PROBLEM_LIMIT=10
+readonly DEFAULT_TELEGRAM_TIMEOUT=15
+readonly DEFAULT_TELEGRAM_NOTIFY_ON_OK=1
+readonly DEFAULT_TELEGRAM_MESSAGE_LIMIT=3500
 
 # Colors
 readonly RED='\033[0;31m'
@@ -32,7 +35,14 @@ CRIT_AGE_HOURS="$DEFAULT_CRIT_AGE_HOURS"
 RECENT_PROBLEM_HOURS="$DEFAULT_RECENT_PROBLEM_HOURS"
 TASK_LIMIT="$DEFAULT_TASK_LIMIT"
 PROBLEM_LIMIT="$DEFAULT_PROBLEM_LIMIT"
+TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
+TELEGRAM_THREAD_ID="${TELEGRAM_THREAD_ID:-}"
+TELEGRAM_TIMEOUT="${TELEGRAM_TIMEOUT:-$DEFAULT_TELEGRAM_TIMEOUT}"
+TELEGRAM_NOTIFY_ON_OK="${TELEGRAM_NOTIFY_ON_OK:-$DEFAULT_TELEGRAM_NOTIFY_ON_OK}"
 TMP_DIR=""
+REPORT_FILE=""
+RUN_STARTED=0
 
 timestamp() {
     date '+%Y-%m-%d %H:%M:%S'
@@ -73,6 +83,11 @@ Options:
   --task-limit N               Number of recent vzdump tasks to inspect per node (default: ${DEFAULT_TASK_LIMIT})
   --problem-limit N            Number of recent problematic tasks to print (default: ${DEFAULT_PROBLEM_LIMIT})
   --log-file PATH              Custom log file path (default: ${DEFAULT_LOG_FILE})
+  --telegram-bot-token TOKEN   Telegram bot token (prefer env or systemd EnvironmentFile in production)
+  --telegram-chat-id ID        Telegram chat ID for notifications
+  --telegram-thread-id ID      Optional Telegram topic/thread ID
+  --telegram-timeout SECONDS   Telegram API timeout (default: ${DEFAULT_TELEGRAM_TIMEOUT})
+  --telegram-no-ok             Skip Telegram notifications for OK results
   --no-color                   Disable colored console output
   -h, --help                   Show this help
 
@@ -81,6 +96,7 @@ Examples:
   $SCRIPT_NAME --node minipveone
   $SCRIPT_NAME --warn-age-hours 48 --crit-age-hours 96
   $SCRIPT_NAME --task-limit 50 --problem-limit 15
+  TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... $SCRIPT_NAME --telegram-no-ok
 EOF
 }
 
@@ -107,6 +123,26 @@ validate_positive_integer() {
     local value="$2"
 
     if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+        log_error "Invalid ${option_name} value: $value"
+        exit 1
+    fi
+}
+
+validate_signed_integer() {
+    local option_name="$1"
+    local value="$2"
+
+    if [[ ! "$value" =~ ^-?[0-9]+$ ]]; then
+        log_error "Invalid ${option_name} value: $value"
+        exit 1
+    fi
+}
+
+validate_zero_or_one() {
+    local option_name="$1"
+    local value="$2"
+
+    if [[ ! "$value" =~ ^[01]$ ]]; then
         log_error "Invalid ${option_name} value: $value"
         exit 1
     fi
@@ -150,6 +186,30 @@ parse_args() {
                 [[ -z "$LOG_FILE" || "$LOG_FILE" == --* ]] && { log_error "Empty or invalid value for --log-file"; exit 1; }
                 shift 2
                 ;;
+            --telegram-bot-token)
+                TELEGRAM_BOT_TOKEN="${2:-}"
+                [[ -z "$TELEGRAM_BOT_TOKEN" || "$TELEGRAM_BOT_TOKEN" == --* ]] && { log_error "Empty or invalid value for --telegram-bot-token"; exit 1; }
+                shift 2
+                ;;
+            --telegram-chat-id)
+                TELEGRAM_CHAT_ID="${2:-}"
+                validate_signed_integer "--telegram-chat-id" "$TELEGRAM_CHAT_ID"
+                shift 2
+                ;;
+            --telegram-thread-id)
+                TELEGRAM_THREAD_ID="${2:-}"
+                validate_positive_integer "--telegram-thread-id" "$TELEGRAM_THREAD_ID"
+                shift 2
+                ;;
+            --telegram-timeout)
+                TELEGRAM_TIMEOUT="${2:-}"
+                validate_positive_integer "--telegram-timeout" "$TELEGRAM_TIMEOUT"
+                shift 2
+                ;;
+            --telegram-no-ok)
+                TELEGRAM_NOTIFY_ON_OK=0
+                shift
+                ;;
             --no-color)
                 USE_COLOR=0
                 shift
@@ -169,6 +229,24 @@ parse_args() {
     if (( WARN_AGE_HOURS >= CRIT_AGE_HOURS )); then
         log_error "--warn-age-hours must be lower than --crit-age-hours"
         exit 1
+    fi
+
+    validate_zero_or_one "TELEGRAM_NOTIFY_ON_OK" "$TELEGRAM_NOTIFY_ON_OK"
+    validate_positive_integer "TELEGRAM_TIMEOUT" "$TELEGRAM_TIMEOUT"
+
+    if [[ -n "$TELEGRAM_CHAT_ID" ]]; then
+        validate_signed_integer "--telegram-chat-id" "$TELEGRAM_CHAT_ID"
+    fi
+
+    if [[ -n "$TELEGRAM_THREAD_ID" ]]; then
+        validate_positive_integer "--telegram-thread-id" "$TELEGRAM_THREAD_ID"
+    fi
+
+    if [[ -n "$TELEGRAM_BOT_TOKEN" || -n "$TELEGRAM_CHAT_ID" || -n "$TELEGRAM_THREAD_ID" ]]; then
+        if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
+            log_error "Telegram notifications require both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID"
+            exit 1
+        fi
     fi
 }
 
@@ -200,6 +278,13 @@ check_dependencies() {
         fi
     done
 
+    if telegram_enabled; then
+        if ! command -v curl >/dev/null 2>&1; then
+            log_error "Required command not found for Telegram notifications: curl"
+            missing=1
+        fi
+    fi
+
     if [[ "$missing" -ne 0 ]]; then
         exit 1
     fi
@@ -216,6 +301,127 @@ cleanup_runtime() {
     if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then
         rm -rf "$TMP_DIR"
         TMP_DIR=""
+    fi
+}
+
+telegram_enabled() {
+    [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]
+}
+
+build_telegram_message() {
+    local rc="$1"
+    local host_name
+
+    if ! host_name="$(hostname -s 2>/dev/null)"; then
+        host_name="$(hostname 2>/dev/null || printf 'unknown-host')"
+    fi
+
+    if [[ -z "$REPORT_FILE" || ! -f "$REPORT_FILE" ]]; then
+        REPORT_FILE="$TMP_DIR/telegram-fallback-report.txt"
+        cat > "$REPORT_FILE" <<EOF
+=== PROXMOX BACKUP HEALTH CHECK ===
+Generated at: $(date)
+
+No report content is available because the script exited before the report was generated.
+Check the log file for details: $LOG_FILE
+EOF
+    fi
+
+    python3 - "$rc" "$host_name" "$LOG_FILE" "$DEFAULT_TELEGRAM_MESSAGE_LIMIT" < "$REPORT_FILE" <<'PY'
+import sys
+
+rc = int(sys.argv[1])
+host_name = sys.argv[2]
+log_file = sys.argv[3]
+limit = int(sys.argv[4])
+report = sys.stdin.read().strip()
+
+status = {
+    0: "OK",
+    1: "WARN",
+    2: "CRIT",
+}.get(rc, "ERROR")
+
+prefix = (
+    f"Proxmox backup health check on {host_name}\n"
+    f"Status: {status}\n"
+    f"Log: {log_file}\n\n"
+)
+message = prefix + (report or "No report content available.")
+
+if len(message) > limit:
+    suffix = "\n\n[truncated in Telegram; see the log file for the full report]"
+    message = message[: limit - len(suffix)] + suffix
+
+print(message)
+PY
+}
+
+send_telegram_notification() {
+    local rc="$1"
+    local message_file="$TMP_DIR/telegram-message.txt"
+    local curl_stderr_file="$TMP_DIR/telegram-curl.stderr"
+    local api_url="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+    local -a curl_args
+
+    if ! telegram_enabled; then
+        return 0
+    fi
+
+    if [[ "$TELEGRAM_NOTIFY_ON_OK" -eq 0 && "$rc" -eq 0 ]]; then
+        log_info "Skipping Telegram notification for OK result"
+        return 0
+    fi
+
+    if ! build_telegram_message "$rc" > "$message_file"; then
+        log_warning "Failed to build Telegram notification payload"
+        return 0
+    fi
+
+    curl_args=(
+        --silent
+        --show-error
+        --fail
+        --connect-timeout "$TELEGRAM_TIMEOUT"
+        --max-time "$(( TELEGRAM_TIMEOUT * 2 ))"
+        --retry 2
+        --retry-delay 2
+        -X POST "$api_url"
+        --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}"
+        --data-urlencode "text@${message_file}"
+        --data-urlencode "disable_web_page_preview=true"
+    )
+
+    if [[ -n "$TELEGRAM_THREAD_ID" ]]; then
+        curl_args+=(--data-urlencode "message_thread_id=${TELEGRAM_THREAD_ID}")
+    fi
+
+    if curl "${curl_args[@]}" > /dev/null 2> "$curl_stderr_file"; then
+        log_success "Telegram notification sent"
+        return 0
+    fi
+
+    log_info "Retrying Telegram notification over IPv4"
+
+    if curl -4 "${curl_args[@]}" > /dev/null 2> "$curl_stderr_file"; then
+        log_warning "Telegram notification required IPv4 fallback"
+        log_success "Telegram notification sent"
+        return 0
+    fi
+
+    if [[ -s "$curl_stderr_file" ]]; then
+        log_warning "Telegram API error: $(tr '\n' ' ' < "$curl_stderr_file")"
+    fi
+
+    log_warning "Failed to send Telegram notification"
+}
+
+handle_exit() {
+    local rc="$1"
+
+    if [[ "$RUN_STARTED" -eq 1 ]]; then
+        send_telegram_notification "$rc"
+        cleanup_runtime
     fi
 }
 
@@ -305,6 +511,8 @@ collect_cluster_data() {
 print_report() {
     local report_file="$TMP_DIR/report.txt"
     local rc
+
+    REPORT_FILE="$report_file"
 
     if python3 - "$TMP_DIR" "$WARN_AGE_HOURS" "$CRIT_AGE_HOURS" "$RECENT_PROBLEM_HOURS" "$PROBLEM_LIMIT" > "$report_file" <<'PY'
 import json
@@ -547,7 +755,8 @@ main() {
     ensure_log_file
     check_dependencies
     setup_runtime
-    trap 'cleanup_runtime' EXIT
+    RUN_STARTED=1
+    trap 'handle_exit $?' EXIT
 
     start_time="$(date +%s)"
 
@@ -558,6 +767,12 @@ main() {
     log_info "Warn age threshold: ${WARN_AGE_HOURS}h"
     log_info "Critical age threshold: ${CRIT_AGE_HOURS}h"
     log_info "Recent problem window: ${RECENT_PROBLEM_HOURS}h"
+    if telegram_enabled; then
+        log_info "Telegram notifications: enabled"
+        log_info "Telegram notify on OK: $TELEGRAM_NOTIFY_ON_OK"
+    else
+        log_info "Telegram notifications: disabled"
+    fi
     if [[ -n "$NODE_FILTER" ]]; then
         log_info "Node filter: $NODE_FILTER"
     fi

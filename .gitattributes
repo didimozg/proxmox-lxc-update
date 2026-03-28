@@ -9,6 +9,9 @@
 *.xml text eol=lf
 *.md text eol=lf
 *.txt text eol=lf
+*.service text eol=lf
+*.timer text eol=lf
+*.example text eol=lf
 
 *.ps1 text eol=crlf
 *.psm1 text eol=crlf

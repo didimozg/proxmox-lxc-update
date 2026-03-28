@@ -1,0 +1,18 @@
+[Unit]
+Description=Proxmox backup health check
+Documentation=https://github.com/didimozg/proxmox-lxc-update
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=SCRIPT_PATH=/usr/local/sbin/backup-health-check.sh
+Environment=LOG_FILE=/var/log/pve-backup-health-check.log
+Environment=BACKUP_HEALTH_CHECK_ARGS=
+EnvironmentFile=-/etc/default/proxmox-backup-health-check
+ExecStart=/bin/bash -lc 'set -euo pipefail; script="${SCRIPT_PATH}"; log_file="${LOG_FILE}"; args=(); if [[ -n "${BACKUP_HEALTH_CHECK_ARGS:-}" ]]; then read -r -a args <<< "${BACKUP_HEALTH_CHECK_ARGS}"; fi; exec "$$script" --no-color --log-file "$$log_file" "$${args[@]}"'
+
+[Install]
+WantedBy=multi-user.target
